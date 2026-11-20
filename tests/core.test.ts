@@ -108,6 +108,49 @@ test('snapshot includes closed and nonstandard states, full edges, and uncapped 
   });
 });
 
+test('snapshot reads raw export edges without a per-issue dependency query', async () => {
+  const issues = Array.from({ length: 201 }, (_, index) => ({ ...rawIssue, id: `fixture-${index}` }));
+  await withBd(`
+    const args = process.argv.slice(2);
+    const issues = ${JSON.stringify(issues)};
+    if (args.includes('dep')) process.exit(91);
+    if (args.includes('export')) {
+      if (!args.includes('--include-infra') || args.includes('--all')) process.exit(92);
+      process.stdout.write([...issues.map((issue) => JSON.stringify({
+        ...issue, dependencies: issue.id === 'fixture-200'
+          ? [{ issue_id: issue.id, depends_on_id: 'external:other:issue', type: 'blocks' }]
+          : [],
+      })), JSON.stringify({ _type: 'memory', key: 'fixture-note', value: 'not an issue' })].join('\\n'));
+    } else if (args.includes('list')) process.stdout.write(JSON.stringify(issues));
+    else if (args.includes('ready') || args.includes('blocked')) process.stdout.write('[]');
+    else process.exit(90);
+  `, async (project) => {
+    const snapshot = await handleRequest({ method: 'snapshot', project: project.id }, [project]) as Snapshot;
+    assert.equal(snapshot.issues.length, 201);
+    assert.deepEqual(snapshot.issues[200]?.dependencies, [{ id: 'external:other:issue', type: 'blocks' }]);
+  });
+});
+
+test('snapshot queries raw edges only for issues omitted by export', async () => {
+  const excluded = { ...rawIssue, id: 'fixture-excluded' };
+  await withBd(`
+    const args = process.argv.slice(2);
+    const issues = [${JSON.stringify(rawIssue)}, ${JSON.stringify(excluded)}];
+    if (args.includes('export')) process.stdout.write(JSON.stringify({ ...issues[0], dependencies: [] }));
+    else if (args.includes('dep')) {
+      const ids = args.slice(args.indexOf('--') + 1);
+      if (ids.length !== 2 || ids.some((id) => id !== 'fixture-excluded')) process.exit(91);
+      process.stdout.write(JSON.stringify([{ issue_id: 'fixture-excluded', depends_on_id: 'external:other:issue', type: 'related' }]));
+    } else if (args.includes('list')) process.stdout.write(JSON.stringify(issues));
+    else if (args.includes('ready') || args.includes('blocked')) process.stdout.write('[]');
+    else process.exit(90);
+  `, async (project) => {
+    const snapshot = await handleRequest({ method: 'snapshot', project: project.id }, [project]) as Snapshot;
+    assert.deepEqual(snapshot.issues[0]?.dependencies, []);
+    assert.deepEqual(snapshot.issues[1]?.dependencies, [{ id: 'external:other:issue', type: 'related' }]);
+  });
+});
+
 test('issue details normalize schema fields and use authoritative directed edges over embedded show details', async () => {
   const issue = {
     ...rawIssue, notes: 'Working notes', acceptance_criteria: 'Reviewed', design: 'Design',

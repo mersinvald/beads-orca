@@ -306,14 +306,52 @@ function normalizeIssue(row: Row): Issue {
   return issue;
 }
 
-async function issuesWithDependencies(value: unknown, run: Run): Promise<Issue[]> {
+async function exportedDependencies(run: Run, byId: Map<string, Issue>): Promise<Set<string>> {
+  // Export reads raw edges in one query. It can omit issues when an owner
+  // exclusion is configured, so the caller must fetch their edges separately.
+  const output = await run(['export', '--include-infra'], true, false);
+  const values = typeof output === 'string'
+    ? output.split(/\r?\n/u).filter((line) => line.trim()).map((line) => JSON.parse(line) as unknown)
+    : output === null ? [] : Array.isArray(output) ? output : [output];
+  const covered = new Set<string>();
+  for (const value of values) {
+    const row = object(value, 'bd export row');
+    if (row._type === 'memory') continue;
+    const issue = byId.get(stringField(row, 'id', true));
+    if (!issue || covered.has(issue.id)) continue;
+    const raw = row.dependencies;
+    if (raw !== undefined && raw !== null && !Array.isArray(raw)) continue;
+    const dependencies: Issue['dependencies'] = [];
+    let valid = true;
+    for (const value of raw ?? []) {
+      try {
+        const dependency = object(value, 'bd export dependency');
+        if (stringField(dependency, 'issue_id', true) !== issue.id) throw new Error('Wrong source issue');
+        dependencies.push({ id: stringField(dependency, 'depends_on_id', true), type: stringField(dependency, 'type', true) });
+      } catch { valid = false; break; }
+    }
+    if (!valid) continue;
+    issue.dependencies = dependencies;
+    covered.add(issue.id);
+  }
+  return covered;
+}
+
+async function issuesWithDependencies(value: unknown, run: Run, useExport = false): Promise<Issue[]> {
   const issues = rows(value, 'issues').map(normalizeIssue);
   const byId = new Map(issues.map((issue) => [issue.id, issue]));
+  let covered = new Set<string>();
+  if (useExport && issues.length) {
+    // Older bd versions can lack export. The raw dep query remains the
+    // complete fallback when export fails or excludes an issue.
+    try { covered = await exportedDependencies(run, byId); } catch { /* Fetch raw edges below. */ }
+  }
   // bd 1.3.2 dep.go: single-ID hydration drops targets absent from this store.
   // Repeat a lone anchor to select raw edges, as dep_list_cross_db_test.go does.
   // readDepListEdges deduplicates anchors, so this does not duplicate edges.
-  for (let offset = 0; offset < issues.length; offset += DEPENDENCY_BATCH_SIZE) {
-    const ids = issues.slice(offset, offset + DEPENDENCY_BATCH_SIZE).map((issue) => issue.id);
+  const missing = issues.filter((issue) => !covered.has(issue.id));
+  for (let offset = 0; offset < missing.length; offset += DEPENDENCY_BATCH_SIZE) {
+    const ids = missing.slice(offset, offset + DEPENDENCY_BATCH_SIZE).map((issue) => issue.id);
     if (ids.length === 1) ids.push(ids[0]!);
     const dependencies = rows(await run(['dep', 'list', '--direction=down', '--', ...ids], true), 'dep list');
     for (const dependency of dependencies) {
@@ -354,9 +392,9 @@ export async function handleRequest(request: RpcRequest, projects: Project[], ta
   switch (request.method) {
     case 'snapshot': {
       // Explicit unlimited queries: bd defaults to 50 list / 100 ready rows.
-      // Include every stored status and normally hidden category; do not export
-      // (export has owner filters and omits the ephemeral storage plane).
-      const issues = await issuesWithDependencies(await run(LIST_ALL, true), run);
+      // Include every stored status and normally hidden category. Export is
+      // only an edge source because it can omit filtered and ephemeral issues.
+      const issues = await issuesWithDependencies(await run(LIST_ALL, true), run, true);
       const readyIds = rows(await run(['ready', '--limit=0', '--include-ephemeral'], true), 'ready').map((row) => stringField(row, 'id', true));
       const blockedIds = rows(await run(['blocked'], true), 'blocked').map((row) => stringField(row, 'id', true));
       const snapshot: Snapshot = { project: { ...project }, issues, readyIds, blockedIds, fetchedAt: new Date().toISOString() };
