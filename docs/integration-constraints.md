@@ -4,7 +4,9 @@ Local/SSH access and explicit workflow operations use Orca's native workspace id
 
 ## Remote configuration and execution
 
-The trusted Node worker runs on the desktop; selecting a remote workspace does not move it. `ProjectAccess` resolves registered native workspace IDs, paths, and hosts. Local projects use installed `bd`; remote projects use the same native CLI through **system SSH**, not terminal-screen parsing, direct database access, or `bd serve`.
+The trusted Node worker runs on the desktop. `ProjectAccess` resolves registered workspace IDs, paths, and hosts. Local projects use installed `bd`. Remote projects use `bd` through **system SSH**.
+
+For mapped paired servers, the worker reads the worktree list through Orca CLI. Orca 1.4.266 returned no paired workspaces from the desktop plugin host API during a live Mac test. The worker stores the last successful worktree list in plugin storage. This list keeps remote projects visible when a server disconnects. Beads issue snapshots remain separate and keep their existing offline rules.
 
 Set **Remote Beads SSH connections** (`remoteHosts`) to a JSON object keyed by the exact Orca workspace `hostId` shown for the project. For example, replace the sample ID and connection values with your own:
 
@@ -22,7 +24,7 @@ Set **Remote Beads SSH connections** (`remoteHosts`) to a JSON object keyed by t
 - SSH uses `BatchMode=yes`, `ConnectTimeout=8`, no PTY, and cleared forwardings. Configure keys/agent access and known-host trust separately; the plugin neither extracts Orca secrets nor performs interactive authentication. No remote server/helper installation or port opening is performed.
 - The execution host needs an initialized `.beads/` project and `bd` 1.3.2 on its noninteractive PATH. Remote execution requires a POSIX-compatible shell. Confined file reads, metadata inspection, writes, and cleanup require **POSIX filesystem semantics and `python3` on the workspace host**, including local file access. This is not a Windows parity claim.
 - `projectPaths` remains newline-separated **local** absolute paths. A remote path with the same spelling is never treated as a local substitute.
-- A `runtime:…`/paired host ID may be explicitly mapped to an SSH destination for file/Beads access. Without that mapping it stays visible as unsupported; there is no general paired-runtime file/exec adapter. Native paired CLI addressing is implemented but a real paired environment has not been exercised.
+- Map each `runtime:…` host ID to an SSH destination for file and Beads access. The plugin uses Orca CLI to find the paired server's worktrees. It uses SSH to read and change Beads data. A remote server without a mapping is unsupported.
 - **Source Beads project and target code workspace must have the same execution-host identity.** Desktop access to both hosts does not grant the target agent cross-host credentials. Separate worktrees can share a source database only through that original same-host source directory; the plugin never copies `.beads`.
 - Current-workspace identification requires a unique native name/branch match. Ambiguous matches do not silently pick a workspace. Truncated native workspace lists are explicit errors.
 

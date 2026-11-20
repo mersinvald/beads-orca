@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { executeSsh, handleRequest, ProjectUnavailableError, quoteRemote, RemoteUnavailableError, type SshTarget } from '../core/service.js';
 import type { Project, ProjectAvailability, RpcRequest, Snapshot } from '../shared.js';
+import { NativeWorkflowCli, type WorkflowCli } from './workflow-cli.js';
 
 export interface ProductHost {
   host: { call(method: string, params?: Record<string, unknown>): Promise<unknown> };
@@ -212,21 +213,61 @@ export class ProjectAccess {
   private readonly state = new Map<string, AvailabilityState>();
   private readonly cacheQueues = new Map<string, Promise<void>>();
 
-  constructor(private readonly host: ProductHost) {}
+  constructor(private readonly host: ProductHost, private readonly cli: WorkflowCli = new NativeWorkflowCli()) {}
+
+  private async pairedWorkspaces(mappings: Map<string, RemoteMapping>): Promise<Workspace[]> {
+    const results = await Promise.all([...mappings.keys()].filter((id) => id.startsWith('runtime:')).map(async (hostId) => {
+      const environment = hostId.slice('runtime:'.length);
+      if (!/^[a-f0-9-]{36}$/u.test(environment)) return [];
+      const cacheKey = `beads.paired-workspaces.${environment}`;
+      try {
+        const response = await this.cli.run(['worktree', 'list', '--environment', environment]);
+        if (!response || typeof response !== 'object') throw new Error('Invalid Orca worktree list');
+        const page = response as { worktrees?: unknown; truncated?: unknown };
+        if (!Array.isArray(page.worktrees) || page.truncated === true) throw new Error('Incomplete Orca worktree list');
+        const workspaces = page.worktrees.flatMap((item: unknown): Workspace[] => {
+          if (!item || typeof item !== 'object') return [];
+          const row = item as Record<string, unknown>;
+          if (typeof row.id !== 'string' || typeof row.path !== 'string' || !isAbsolute(row.path)) return [];
+          const branch = typeof row.branch === 'string' ? row.branch.replace(/^refs\/heads\//u, '') : null;
+          return [{ id: `${hostId}::${row.id}`, name: basename(row.path), path: row.path, hostId, branch }];
+        });
+        await this.host.host.call('storage.set', { key: cacheKey, value: workspaces }).catch(() => undefined);
+        return workspaces;
+      } catch { // A disconnected paired server must not hide local or other reachable projects.
+        const cached = await this.host.host.call('storage.get', { key: cacheKey }).catch(() => null) as { value?: unknown } | null;
+        if (Array.isArray(cached?.value)) return cached.value.filter((item): item is Workspace =>
+          !!item && typeof item === 'object' && typeof item.id === 'string' && item.id.startsWith(`${hostId}::`) &&
+          typeof item.name === 'string' && typeof item.path === 'string' && isAbsolute(item.path) && item.hostId === hostId);
+        return [];
+      }
+    }));
+    return results.flat();
+  }
 
   private async discover(): Promise<Discovery> {
     const listed = await this.host.host.call('workspace.list') as { workspaces?: Workspace[]; truncated?: boolean };
     if (!listed || !Array.isArray(listed.workspaces)) throw new Error('Orca returned an invalid workspace list');
     if (listed.truncated) throw new Error('Orca truncated its workspace list. Narrow the registered workspaces before using Beads.');
     const mappings = remoteMappings(await this.host.settings.get('remoteHosts'));
-    let context: { displayName?: string; branch?: string } | null = null;
-    try { context = await this.host.host.call('workspace.readContext') as { displayName?: string; branch?: string } | null; } catch { /* Focus is optional. */ }
-    const matches = context ? listed.workspaces.filter((workspace) => workspace.name === context?.displayName && (workspace.branch ?? '') === (context?.branch ?? '')) : [];
+    // Orca 1.4.266 exposes paired workspaces to its CLI, but its Mac plugin
+    // host currently returns an empty workspace.list for those same servers.
+    // Use Orca's own CLI as a read-only discovery fallback for mapped runtimes.
+    const native = listed.workspaces;
+    const seen = new Set(native.map((workspace) => `${workspace.hostId ?? 'local'}\0${workspace.path}`));
+    const paired = await this.pairedWorkspaces(mappings);
+    const workspaces = [...native, ...paired.filter((workspace) => !seen.has(`${workspace.hostId}\0${workspace.path}`))];
+    let context: { workspaceId?: string; displayName?: string; branch?: string } | null = null;
+    try { context = await this.host.host.call('workspace.readContext') as { workspaceId?: string; displayName?: string; branch?: string } | null; } catch { /* Focus is optional. */ }
+    const byId = context?.workspaceId ? workspaces.filter((workspace) =>
+      workspace.id === context?.workspaceId || workspace.id.endsWith(`::${context?.workspaceId}`)) : [];
+    const matches = byId.length ? byId : context ? workspaces.filter((workspace) =>
+      workspace.name === context?.displayName && (workspace.branch ?? '') === (context?.branch ?? '')) : [];
     const currentId = matches.length === 1 ? matches[0]?.id : undefined;
     const targets = new Map<string, SshTarget>();
     const keys = new Map<string, string>();
     const projects: Project[] = [];
-    for (const workspace of listed.workspaces) {
+    for (const workspace of workspaces) {
       if (!workspace || typeof workspace.id !== 'string' || typeof workspace.name !== 'string' || typeof workspace.path !== 'string') {
         throw new Error('Orca returned an invalid workspace');
       }
