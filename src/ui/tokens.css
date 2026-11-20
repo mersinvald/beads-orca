@@ -1,6 +1,7 @@
 /* Design tokens. Values come from the pinned design reference;
    Onest stands in for the proprietary pplxSans. */
 :root {
+  color-scheme: light;
   /* Palette: warm monochrome */
   --color-bg: #fdfbfa;
   --color-surface: #ffffff;
@@ -79,4 +80,31 @@
   --rail-width: 240px;
   --column-width: 304px;
   --drawer-width: 480px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --color-bg: #171717;
+    --color-surface: #222222;
+    --color-wash: #262626;
+    --color-wash-strong: #333333;
+    --color-wash-deep: #3b3b3b;
+    --color-ink: #eeeeee;
+    --color-ink-strong: #ffffff;
+    --color-ink-2: #aaaaaa;
+    --color-ink-3: #777777;
+    --color-accent: #eeeeee;
+    --color-on-accent: #171717;
+
+    --color-line: rgba(255, 255, 255, 0.1);
+    --color-line-strong: rgba(255, 255, 255, 0.2);
+    --color-hover: rgba(255, 255, 255, 0.04);
+    --color-subtle: rgba(255, 255, 255, 0.06);
+    --color-pressed: rgba(255, 255, 255, 0.1);
+    --color-selected: rgba(255, 255, 255, 0.09);
+    --color-ripple: rgba(255, 255, 255, 0.18);
+    --color-scrim: rgba(0, 0, 0, 0.6);
+    --shadow-raised: rgba(0, 0, 0, 0.2) 0px 1px 3px 0px;
+  }
 }

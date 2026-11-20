@@ -6,6 +6,7 @@ import { delimiter, join } from 'node:path';
 import test from 'node:test';
 import { ProjectAccess, type ProductHost } from '../src/orca/projects.js';
 import type { Snapshot } from '../src/shared.js';
+import type { WorkflowCli } from '../src/orca/workflow-cli.js';
 
 type Workspace = { id: string; name: string; path: string; hostId: string | null; branch?: string | null };
 
@@ -23,6 +24,60 @@ function fixtureHost(workspaces: Workspace[], settings: Record<string, string> =
     settings: { async get(key) { return settings[key] ?? ''; } },
   };
 }
+
+test('mapped paired runtimes are discovered through Orca CLI when the plugin host omits them', async () => {
+  const environment = 'd210797a-78f5-4820-8d0c-eef9064b0c52';
+  const hostId = `runtime:${environment}`;
+  const path = '/home/dev/projects/example';
+  const calls: string[][] = [];
+  const cli: WorkflowCli = { async run(argv) {
+    calls.push(argv);
+    return { worktrees: [{ id: 'repo-id::/home/dev/projects/example', path, branch: 'refs/heads/main' }], truncated: false };
+  } };
+  const settings = { remoteHosts: JSON.stringify({ [hostId]: { destination: 'devenv-personal', name: 'Personal' } }) };
+  const access = new ProjectAccess(fixtureHost([], settings), cli);
+  const projects = await access.list();
+  assert.deepEqual(calls, [['worktree', 'list', '--environment', environment]]);
+  assert.equal(projects.length, 1);
+  assert.equal(projects[0]?.name, 'example');
+  assert.equal(projects[0]?.hostId, hostId);
+  assert.equal(projects[0]?.path, path);
+  assert.equal(projects[0]?.workspaceId, `${hostId}::repo-id::${path}`);
+  const native = new ProjectAccess(fixtureHost([{ id: 'native', name: 'kalorie', path, hostId }], settings), cli);
+  assert.deepEqual((await native.list()).map((project) => project.id), ['native']);
+});
+
+test('focused paired worktree is selected by its Orca identity', async () => {
+  const environment = 'd210797a-78f5-4820-8d0c-eef9064b0c52';
+  const hostId = `runtime:${environment}`;
+  const settings = { remoteHosts: JSON.stringify({ [hostId]: { destination: 'devenv-personal' } }) };
+  const base = fixtureHost([], settings);
+  const cli: WorkflowCli = { async run() {
+    return { worktrees: [{ id: 'repo::/home/me/example', path: '/home/me/example', branch: 'refs/heads/main' }], truncated: false };
+  } };
+  const service = new ProjectAccess({ ...base, host: { async call(method, params) {
+    if (method === 'workspace.readContext') return { workspaceId: 'repo::/home/me/example', displayName: 'main', branch: 'main' };
+    return base.host.call(method, params);
+  } } }, cli);
+  assert.equal((await service.list())[0]?.current, true);
+});
+
+test('paired project identities remain available while its Orca server is disconnected', async () => {
+  const environment = 'd210797a-78f5-4820-8d0c-eef9064b0c52';
+  const hostId = `runtime:${environment}`;
+  const storage = new Map<string, unknown>();
+  const host = fixtureHost([], { remoteHosts: JSON.stringify({ [hostId]: { destination: 'devenv-personal' } }) }, storage);
+  let reachable = true;
+  const cli: WorkflowCli = { async run() {
+    if (!reachable) throw new Error('Disconnected');
+    return { worktrees: [{ id: 'repo::/home/me/example', path: '/home/me/example' }], truncated: false };
+  } };
+  const service = new ProjectAccess(host, cli);
+  const online = await service.list();
+  reachable = false;
+  assert.deepEqual(await service.list(), online);
+  assert.deepEqual((await new ProjectAccess(host, cli).list()).map((project) => project.id), online.map((project) => project.id));
+});
 
 test('project discovery keeps remote and unsupported host identities distinct from a local twin', async () => {
   const root = await mkdtemp(join(tmpdir(), 'beads-projects-'));
